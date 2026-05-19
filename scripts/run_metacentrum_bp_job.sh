@@ -1,7 +1,7 @@
 #!/bin/bash
 #PBS -N eoh_bp_kimi
-#PBS -l select=1:ncpus=2:mem=24gb:scratch_local=20gb
-#PBS -l walltime=48:00:00
+#PBS -l select=1:ncpus=2:mem=16gb:scratch_local=30gb
+#PBS -l walltime=32:00:00
 #PBS -o /storage/praha1/home/papaceka/EoH/logs/
 #PBS -e /storage/praha1/home/papaceka/EoH/logs/
 
@@ -26,7 +26,7 @@ API_BASE_URL="${API_BASE_URL:-https://llm.ai.e-infra.cz/v1}"
 MODEL="${MODEL:-kimi-k2.6}"
 POP_SIZE="${POP_SIZE:-10}"
 N_POP="${N_POP:-10}"
-N_PROC="${N_PROC:-2}"
+N_PROC="${N_PROC:-4}"
 E1_PARENTS="${E1_PARENTS:-3}"
 E2_PARENTS="${E2_PARENTS:-3}"
 MAX_ITEMS="${MAX_ITEMS:-}"
