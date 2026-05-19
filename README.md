@@ -52,7 +52,13 @@ This wrapper repo is intended to track only reproducible project code and docs. 
 - `.venv/`
 - `.env*`
 
-You can keep API keys in a local `.env` file. Example:
+You can keep API keys in a local `.env` file. Start from the tracked template:
+
+```bash
+cp .env.example .env
+```
+
+Example:
 
 ```bash
 E_infra_key_1=sk-...
