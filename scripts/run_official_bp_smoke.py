@@ -8,6 +8,7 @@ network client so OpenRouter-style base URLs work.
 from __future__ import annotations
 
 import argparse
+import itertools
 import json
 import os
 import re
@@ -59,6 +60,11 @@ def parse_args() -> argparse.Namespace:
         "--api-key-env",
         default="OPENROUTER_API_KEY",
         help="Environment variable containing the API key.",
+    )
+    parser.add_argument(
+        "--api-key-envs",
+        default=None,
+        help="Comma-separated environment variable names containing API keys. Overrides --api-key-env when set.",
     )
     parser.add_argument(
         "--model",
@@ -119,6 +125,59 @@ def normalize_chat_url(api_base_url: str) -> str:
     if base.endswith("/chat/completions"):
         return base
     return f"{base}/chat/completions"
+
+
+def load_dotenv(path: Path) -> None:
+    if not path.exists():
+        return
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if not key:
+            continue
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        os.environ.setdefault(key, value)
+
+
+class APIKeyPool:
+    def __init__(self, entries: list[tuple[str, str]]):
+        if not entries:
+            raise ValueError("APIKeyPool requires at least one key")
+        self.entries = entries
+        self._counter = itertools.count()
+        self._lock = threading.Lock()
+
+    def next(self) -> tuple[str, str]:
+        with self._lock:
+            index = next(self._counter) % len(self.entries)
+        return self.entries[index]
+
+
+def parse_env_name_list(raw_value: str | None, fallback: str) -> list[str]:
+    source = raw_value if raw_value is not None else fallback
+    names = [item.strip() for item in source.split(",")]
+    return [name for name in names if name]
+
+
+def resolve_api_keys(api_key_envs_arg: str | None, api_key_env_arg: str) -> list[tuple[str, str]]:
+    env_names = parse_env_name_list(api_key_envs_arg, api_key_env_arg)
+    resolved: list[tuple[str, str]] = []
+    missing: list[str] = []
+    for env_name in env_names:
+        value = os.environ.get(env_name)
+        if value:
+            resolved.append((env_name, value))
+        else:
+            missing.append(env_name)
+    if resolved:
+        return resolved
+    missing_text = ", ".join(missing) if missing else api_key_env_arg
+    raise SystemExit(f"Missing API key in ${missing_text}")
 
 
 def utc_now() -> str:
@@ -227,7 +286,13 @@ def persist_event(target_dir: Path, payload: dict[str, Any]) -> Path:
     return path
 
 
-def patch_upstream_client(chat_url: str, out_dir: Path, log_responses: bool, quiet_progress: bool) -> None:
+def patch_upstream_client(
+    chat_url: str,
+    out_dir: Path,
+    log_responses: bool,
+    quiet_progress: bool,
+    api_key_pool: APIKeyPool,
+) -> None:
     from eoh.llm import api_general
     from eoh.llm import interface_LLM
 
@@ -249,27 +314,30 @@ def patch_upstream_client(chat_url: str, out_dir: Path, log_responses: bool, qui
             self.n_trial = 5
 
         def get_response(self, prompt_content: str) -> str | None:
-            headers = {
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-            }
             payload = {
                 "model": self.model_LLM,
                 "messages": [{"role": "user", "content": prompt_content}],
             }
             response_text = None
             for trial in range(1, self.n_trial + 1):
+                key_name, api_key = api_key_pool.next()
+                headers = {
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                }
                 started_at = utc_now()
                 t0 = time.time()
                 if not quiet_progress:
                     console_log(
-                        f"LLM request start: trial={trial} prompt_chars={len(prompt_content)}"
+                        f"LLM request start: trial={trial} prompt_chars={len(prompt_content)} key={key_name}"
                     )
                 trace_payload: dict[str, Any] = {
                     "started_at": started_at,
                     "model": self.model_LLM,
                     "api_endpoint": self.api_endpoint,
                     "chat_url": chat_url,
+                    "api_key_env": key_name,
+                    "api_key_pool_size": len(api_key_pool.entries),
                     "trial": trial,
                     "pid": os.getpid(),
                     "thread_id": threading.get_ident(),
@@ -305,13 +373,14 @@ def patch_upstream_client(chat_url: str, out_dir: Path, log_responses: bool, qui
                         usage = trace_payload.get("usage") or {}
                         cost = trace_payload.get("cost")
                         total_tokens = usage.get("total_tokens")
-                        console_log(
+                        message = (
                             "LLM request done: "
-                            f"status={response.status_code} elapsed={trace_payload['elapsed_s']}s "
+                            f"key={key_name} status={response.status_code} elapsed={trace_payload['elapsed_s']}s "
                             f"tokens={total_tokens if total_tokens is not None else '?'} "
-                            f"cost={float(cost):.4f}" if cost is not None else "cost=?"
                         )
-                    break
+                        message += f"cost={float(cost):.4f}" if cost is not None else "cost=?"
+                        console_log(message)
+                        break
                 except Exception as exc:
                     trace_payload["ok"] = False
                     trace_payload["finished_at"] = utc_now()
@@ -324,7 +393,7 @@ def patch_upstream_client(chat_url: str, out_dir: Path, log_responses: bool, qui
                     persist_trace(trace_payload)
                     if not quiet_progress:
                         console_log(
-                            f"LLM request failed: trial={trial} error={type(exc).__name__}: {exc}"
+                            f"LLM request failed: trial={trial} key={key_name} error={type(exc).__name__}: {exc}"
                         )
                     if self.debug_mode:
                         print("Error in API. Restarting the process...")
@@ -750,6 +819,8 @@ def write_run_metadata(args: argparse.Namespace, out_dir: Path, status: str, ext
         **existing,
         "status": status,
         "api_base_url": args.api_base_url,
+        "api_key_env": args.api_key_env,
+        "api_key_envs": args.api_key_envs,
         "model": args.model,
         "pop_size": args.pop_size,
         "n_pop": args.n_pop,
@@ -790,9 +861,10 @@ def evaluate_reference_baselines() -> dict[str, Any]:
 
 def main() -> int:
     args = parse_args()
-    api_key = os.environ.get(args.api_key_env)
-    if not api_key:
-        raise SystemExit(f"Missing API key in ${args.api_key_env}")
+    load_dotenv(Path(".env"))
+    api_keys = resolve_api_keys(args.api_key_envs, args.api_key_env)
+    api_key_pool = APIKeyPool(api_keys)
+    api_key = api_keys[0][1]
     if args.e1_parents < 2:
         raise SystemExit("--e1-parents must be at least 2")
     if args.e2_parents < 2:
@@ -808,7 +880,7 @@ def main() -> int:
     trace_paths["requests_dir"].mkdir(parents=True, exist_ok=True)
     write_json(trace_paths["summary_path"], summarize_traces(trace_paths["requests_dir"]))
 
-    patch_upstream_client(chat_url, out_dir, args.log_responses, args.quiet_progress)
+    patch_upstream_client(chat_url, out_dir, args.log_responses, args.quiet_progress, api_key_pool)
 
     from eoh import eoh
     from eoh.utils.getParas import Paras
@@ -837,6 +909,8 @@ def main() -> int:
         "started",
         {
             "chat_url": chat_url,
+            "api_key_env_names": [name for name, _ in api_keys],
+            "api_key_count": len(api_keys),
             "started_at": utc_now(),
             "llm_trace_dir": str(trace_paths["trace_dir"]),
             "llm_requests_dir": str(trace_paths["requests_dir"]),
@@ -850,6 +924,11 @@ def main() -> int:
             "Run start: "
             f"pop_size={args.pop_size} n_pop={args.n_pop} n_proc={args.n_proc} "
             f"e1_parents={args.e1_parents} e2_parents={args.e2_parents}"
+        )
+        console_log(
+            "API keys: "
+            + ", ".join(name for name, _ in api_keys)
+            + f" (count={len(api_keys)})"
         )
         console_log(f"Trace summary will be written to {trace_paths['summary_path']}")
         best_baseline = baseline_summary.get("best")

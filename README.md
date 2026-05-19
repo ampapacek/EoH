@@ -52,6 +52,15 @@ This wrapper repo is intended to track only reproducible project code and docs. 
 - `.venv/`
 - `.env*`
 
+You can keep API keys in a local `.env` file. Example:
+
+```bash
+E_infra_key_1=sk-...
+E_infra_key_2=sk-...
+```
+
+The wrapper loads `.env` automatically at startup.
+
 ## How the official online bin packing example is wired upstream
 
 Relevant upstream files:
@@ -94,6 +103,21 @@ With an API key in `OPENROUTER_API_KEY`:
   --log-responses \
   --output-dir results/official_smoke
 ```
+
+To rotate requests across multiple keys, use `--api-key-envs` with a comma-separated list of environment variable names:
+
+```bash
+./.venv/bin/python scripts/run_official_bp_smoke.py \
+  --api-base-url https://llm.ai.e-infra.cz/v1 \
+  --api-key-envs E_infra_key_1,E_infra_key_2 \
+  --model kimi-k2.6 \
+  --pop-size 4 \
+  --n-pop 2 \
+  --n-proc 2 \
+  --output-dir results/kimi_multi_key
+```
+
+The wrapper round-robins requests across the configured keys, which is useful when one key only supports a small number of concurrent requests.
 
 Notes:
 
