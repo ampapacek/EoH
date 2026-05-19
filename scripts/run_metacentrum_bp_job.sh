@@ -11,6 +11,15 @@ PROJECT_DIR="/storage/praha1/home/papaceka/EoH"
 LOG_DIR="$PROJECT_DIR/logs"
 RUNNER_SCRIPT="$PROJECT_DIR/scripts/run_metacentrum_bp.sh"
 
+cd "$PROJECT_DIR"
+
+if [[ -f .env ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source .env
+  set +a
+fi
+
 API_KEY_ENV="${API_KEY_ENV:-E_infra_key}"
 API_KEY_ENVS="${API_KEY_ENVS:-}"
 API_BASE_URL="${API_BASE_URL:-https://llm.ai.e-infra.cz/v1}"
@@ -31,7 +40,17 @@ RUN_LOG="$LOG_DIR/eoh_bp_${JOB_TAG}.log"
 
 exec > >(tee -a "$RUN_LOG") 2>&1
 
-cd "$PROJECT_DIR"
+if [[ -z "$API_KEY_ENVS" ]]; then
+  AUTO_KEY_NAMES=()
+  for KEY_NAME in E_infra_key_1 E_infra_key_2 E_infra_key_3; do
+    if [[ -n "${!KEY_NAME:-}" ]]; then
+      AUTO_KEY_NAMES+=("$KEY_NAME")
+    fi
+  done
+  if [[ "${#AUTO_KEY_NAMES[@]}" -ge 2 ]]; then
+    API_KEY_ENVS="$(IFS=,; echo "${AUTO_KEY_NAMES[*]}")"
+  fi
+fi
 
 echo "=== Job started ==="
 date

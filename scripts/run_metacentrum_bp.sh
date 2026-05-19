@@ -5,6 +5,13 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
+if [[ -f .env ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source .env
+  set +a
+fi
+
 API_BASE_URL="${API_BASE_URL:-https://llm.ai.e-infra.cz/v1}"
 API_KEY_ENV="${API_KEY_ENV:-E_infra_key}"
 API_KEY_ENVS="${API_KEY_ENVS:-}"
@@ -17,6 +24,18 @@ E2_PARENTS="${E2_PARENTS:-2}"
 MAX_ITEMS="${MAX_ITEMS:-}"
 OUTPUT_DIR="${OUTPUT_DIR:-results/metacentrum_${MODEL}_pop${POP_SIZE}_gen${N_POP}}"
 EXTRA_ARGS=("$@")
+
+if [[ -z "$API_KEY_ENVS" ]]; then
+  AUTO_KEY_NAMES=()
+  for KEY_NAME in E_infra_key_1 E_infra_key_2 E_infra_key_3; do
+    if [[ -n "${!KEY_NAME:-}" ]]; then
+      AUTO_KEY_NAMES+=("$KEY_NAME")
+    fi
+  done
+  if [[ "${#AUTO_KEY_NAMES[@]}" -ge 2 ]]; then
+    API_KEY_ENVS="$(IFS=,; echo "${AUTO_KEY_NAMES[*]}")"
+  fi
+fi
 
 if [[ ! -x ./.venv/bin/python ]]; then
   echo "Missing .venv. Run 'make build' first." >&2
