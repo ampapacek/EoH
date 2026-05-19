@@ -69,6 +69,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--n-pop", type=int, default=1)
     parser.add_argument("--n-proc", type=int, default=1)
     parser.add_argument(
+        "--e1-parents",
+        type=int,
+        default=2,
+        help="Number of parents sampled for the e1 operator.",
+    )
+    parser.add_argument(
+        "--e2-parents",
+        type=int,
+        default=2,
+        help="Number of parents sampled for the e2 operator.",
+    )
+    parser.add_argument(
         "--max-items",
         type=int,
         default=None,
@@ -269,7 +281,7 @@ def patch_upstream_client(chat_url: str, out_dir: Path, log_responses: bool, qui
                         chat_url,
                         headers=headers,
                         json=payload,
-                        timeout=90,
+                        timeout=180,
                     )
                     elapsed_s = time.time() - t0
                     trace_payload["http_status"] = response.status_code
@@ -323,7 +335,12 @@ def patch_upstream_client(chat_url: str, out_dir: Path, log_responses: bool, qui
     interface_LLM.InterfaceAPI = PatchedInterfaceAPI
 
 
-def patch_failure_diagnostics(out_dir: Path, quiet_progress: bool) -> None:
+def patch_failure_diagnostics(
+    out_dir: Path,
+    quiet_progress: bool,
+    e1_parent_count: int,
+    e2_parent_count: int,
+) -> None:
     import concurrent.futures
     import sys
     import types
@@ -362,6 +379,37 @@ def patch_failure_diagnostics(out_dir: Path, quiet_progress: bool) -> None:
     def candidate_debug_snapshot(self: Any) -> dict[str, Any] | None:
         value = getattr(self, "_last_candidate_debug", None)
         return value if isinstance(value, dict) else None
+
+    def patched_interface_get_alg(self: Any, pop: list[dict[str, Any]], operator: str) -> tuple[Any, dict[str, Any]]:
+        offspring = {
+            "algorithm": None,
+            "code": None,
+            "objective": None,
+            "other_inf": None,
+        }
+        if operator == "i1":
+            parents = None
+            [offspring["code"], offspring["algorithm"]] = self.evol.i1()
+        elif operator == "e1":
+            parent_count = max(2, int(e1_parent_count))
+            parents = self.select.parent_selection(pop, parent_count)
+            [offspring["code"], offspring["algorithm"]] = self.evol.e1(parents)
+        elif operator == "e2":
+            parent_count = max(2, int(e2_parent_count))
+            parents = self.select.parent_selection(pop, parent_count)
+            [offspring["code"], offspring["algorithm"]] = self.evol.e2(parents)
+        elif operator == "m1":
+            parents = self.select.parent_selection(pop, 1)
+            [offspring["code"], offspring["algorithm"]] = self.evol.m1(parents[0])
+        elif operator == "m2":
+            parents = self.select.parent_selection(pop, 1)
+            [offspring["code"], offspring["algorithm"]] = self.evol.m2(parents[0])
+        elif operator == "m3":
+            parents = self.select.parent_selection(pop, 1)
+            [offspring["code"], offspring["algorithm"]] = self.evol.m3(parents[0])
+        else:
+            raise ValueError(f"Evolution operator [{operator}] has not been implemented")
+        return parents, offspring
 
     def patched_get_alg(self: Any, prompt_content: str) -> list[str]:
         attempts: list[dict[str, Any]] = []
@@ -652,6 +700,7 @@ def patch_failure_diagnostics(out_dir: Path, quiet_progress: bool) -> None:
     original_run = eoh_method.EOH.run
     eoh_evolution.Evolution._get_alg = patched_get_alg
     bp_run.BPONLINE.evaluate = patched_evaluate
+    eoh_interface_EC.InterfaceEC._get_alg = patched_interface_get_alg
     eoh_interface_EC.InterfaceEC.get_offspring = patched_get_offspring
     eoh_interface_EC.InterfaceEC.get_algorithm = patched_get_algorithm
     eoh_method.EOH.run = patched_run
@@ -705,6 +754,8 @@ def write_run_metadata(args: argparse.Namespace, out_dir: Path, status: str, ext
         "pop_size": args.pop_size,
         "n_pop": args.n_pop,
         "n_proc": args.n_proc,
+        "e1_parents": args.e1_parents,
+        "e2_parents": args.e2_parents,
         "max_items": args.max_items,
         "log_responses": args.log_responses,
         **extra,
@@ -742,6 +793,10 @@ def main() -> int:
     api_key = os.environ.get(args.api_key_env)
     if not api_key:
         raise SystemExit(f"Missing API key in ${args.api_key_env}")
+    if args.e1_parents < 2:
+        raise SystemExit("--e1-parents must be at least 2")
+    if args.e2_parents < 2:
+        raise SystemExit("--e2-parents must be at least 2")
 
     chat_url = normalize_chat_url(args.api_base_url)
     parsed = urlparse(chat_url)
@@ -759,7 +814,7 @@ def main() -> int:
     from eoh.utils.getParas import Paras
 
     patch_bp_dataset(args.max_items, args.quiet_progress)
-    patch_failure_diagnostics(out_dir, args.quiet_progress)
+    patch_failure_diagnostics(out_dir, args.quiet_progress, args.e1_parents, args.e2_parents)
     baseline_summary = evaluate_reference_baselines()
 
     paras = Paras()
@@ -792,7 +847,9 @@ def main() -> int:
     )
     if not args.quiet_progress:
         console_log(
-            f"Run start: pop_size={args.pop_size} n_pop={args.n_pop} n_proc={args.n_proc}"
+            "Run start: "
+            f"pop_size={args.pop_size} n_pop={args.n_pop} n_proc={args.n_proc} "
+            f"e1_parents={args.e1_parents} e2_parents={args.e2_parents}"
         )
         console_log(f"Trace summary will be written to {trace_paths['summary_path']}")
         best_baseline = baseline_summary.get("best")
