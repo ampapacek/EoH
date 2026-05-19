@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+.env
+.env.*
+
+# Local upstream clone; recreated by `make build`.
+EoH/
+
+# Generated experiment outputs and logs.
+results/
+logs/
